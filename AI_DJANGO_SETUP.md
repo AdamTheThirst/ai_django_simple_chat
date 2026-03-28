@@ -6,7 +6,7 @@
 
 Все чувствительные данные и параметры подключения хранятся в `.env`:
 
-- `AI_BASE_URL` — URL точки входа OpenAI-compatible сервера (например vLLM), обычно с `/v1`
+- `AI_BASE_URL` — URL точки входа OpenAI-compatible сервера (например vLLM), лучше указывать сразу с `/v1`
 - `AI_API_KEY` — API ключ
 - `AI_MODEL` — имя модели (например `Qwen/Qwen3-32B`)
 - `AI_MASTER_PROMPT` — мастер-промпт (system message)
@@ -61,6 +61,13 @@ client.chat.completions.create(
 ```
 
 4. Возвращается `chat_response.choices[0].message.content`.
+
+### Важно про ошибку `405 Method Not Allowed`
+
+Если сервер вернул `405`, очень частая причина — base URL указан без `/v1`.
+
+В проекте добавлен fallback: при `405` и URL без `/v1` клиент автоматически повторяет запрос на `${AI_BASE_URL}/v1`.
+Но лучше сразу прописать корректный `AI_BASE_URL` c `/v1` в `.env`.
 
 ## 4) Как работает контекст 20 пар
 
