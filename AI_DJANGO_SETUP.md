@@ -1,105 +1,230 @@
-# Подключение Django к AI (vLLM/OpenAI-compatible API)
+# Universal guide: how to connect Django to AI (OpenAI-compatible API)
 
-Ниже — подробный гайд, как подключён AI в проекте.
+Этот файл можно положить в **любой Django-проект** как универсальную инструкцию для разработчика (и для Codex), чтобы быстро и предсказуемо подключить AI.
 
-## 1) Где хранится конфигурация
+---
 
-Все чувствительные данные и параметры подключения хранятся в `.env`:
+## 1) Что нужно подготовить заранее
 
-- `AI_BASE_URL` — URL точки входа OpenAI-compatible сервера (например vLLM), лучше указывать сразу с `/v1`
-- `AI_API_KEY` — API ключ
-- `AI_MODEL` — имя модели (например `Qwen/Qwen3-32B`)
-- `AI_MASTER_PROMPT` — мастер-промпт (system message)
+Минимум:
 
-Пример есть в `.env.example`.
+- Django-проект (любой структуры)
+- OpenAI-compatible endpoint (OpenAI, vLLM, LiteLLM gateway, proxy и т.д.)
+- API ключ
+- выбранная модель
 
-## 2) Как Django читает `.env`
+Важно:
 
-В `chat_project/settings.py` вызывается:
+- Для большинства OpenAI-compatible серверов нужен путь вида `/v1` в базовом URL.
+- Наиболее частая ошибка конфигурации — неправильный endpoint (например, без `/v1`).
+
+---
+
+## 2) Рекомендуемый контракт переменных окружения
+
+Используйте `.env` и держите все чувствительные данные там.
+
+```env
+AI_BASE_URL=https://your-endpoint.example.com/v1
+AI_API_KEY=your_api_key
+AI_MODEL=gpt-4o-mini
+AI_MASTER_PROMPT=Ты — полезный и точный ассистент. Отвечай ясно и структурированно.
+AI_TIMEOUT_SECONDS=60
+```
+
+Рекомендации:
+
+- Не храните ключи в коде.
+- Для разных сред делайте разные `.env` (dev/stage/prod).
+- Если у вас внутренний gateway, всё равно соблюдайте тот же контракт переменных.
+
+---
+
+## 3) Подключение `.env` в Django settings
+
+Пример универсального подхода:
 
 ```python
+# settings.py
+import os
 from dotenv import load_dotenv
+
 load_dotenv()
+
+AI_BASE_URL = os.getenv("AI_BASE_URL", "")
+AI_API_KEY = os.getenv("AI_API_KEY", "")
+AI_MODEL = os.getenv("AI_MODEL", "")
+AI_MASTER_PROMPT = os.getenv("AI_MASTER_PROMPT", "")
+AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "60"))
 ```
 
-После этого переменные читаются через `os.getenv(...)` и сохраняются в настройках:
+Проверьте, что библиотека для `.env` установлена (`python-dotenv`).
 
-- `AI_BASE_URL`
-- `AI_API_KEY`
-- `AI_MODEL`
-- `AI_MASTER_PROMPT`
+---
 
-## 3) Логика запроса к AI
+## 4) Универсальный сервисный слой (рекомендуемая архитектура)
 
-В `chat_app/services.py`:
+Создайте отдельный модуль/сервис, например:
 
-1. Создаётся клиент:
+- `apps/common/ai_service.py`
+- или `core/services/ai.py`
+- или любой аналогичный слой
+
+Задачи сервиса:
+
+1. Проверить обязательные настройки (`AI_BASE_URL`, `AI_API_KEY`, `AI_MODEL`).
+2. Собрать `messages` для LLM.
+3. Выполнить запрос к AI.
+4. Вернуть чистый текст ответа.
+5. Бросать осмысленные исключения (не прятать их полностью в сервисе).
+
+Базовый пример:
 
 ```python
-client = OpenAI(
-    base_url=settings.AI_BASE_URL,
-    api_key=settings.AI_API_KEY,
-)
+from django.conf import settings
+from openai import OpenAI
+
+
+def ask_ai(messages: list[dict], temperature: float = 0.7, max_tokens: int = 400) -> str:
+    if not settings.AI_BASE_URL:
+        raise ValueError("AI_BASE_URL is not configured")
+    if not settings.AI_API_KEY:
+        raise ValueError("AI_API_KEY is not configured")
+    if not settings.AI_MODEL:
+        raise ValueError("AI_MODEL is not configured")
+
+    client = OpenAI(base_url=settings.AI_BASE_URL.rstrip("/"), api_key=settings.AI_API_KEY)
+
+    response = client.chat.completions.create(
+        model=settings.AI_MODEL,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+    return response.choices[0].message.content or ""
 ```
 
-2. Формируется `messages`:
+---
 
-- `system` с мастер-промптом
-- последние сообщения контекста (до 20 пар = до 40 сообщений)
-- текущее сообщение пользователя
+## 5) Как формировать `messages` правильно
 
-3. Вызывается Chat Completions:
+Рекомендуемый порядок:
+
+1. `system` (мастер-промпт)
+2. история диалога (если есть)
+3. текущее сообщение пользователя
+
+Пример:
 
 ```python
-client.chat.completions.create(
-    model=settings.AI_MODEL,
-    messages=messages,
-    max_tokens=400,
-    temperature=0.7,
-    top_p=0.8,
-)
+messages = [
+    {"role": "system", "content": settings.AI_MASTER_PROMPT},
+    *history_messages,
+    {"role": "user", "content": user_text},
+]
 ```
 
-4. Возвращается `chat_response.choices[0].message.content`.
+Где `history_messages` обычно ограничивается по объёму (например, последние 10–30 пар), чтобы не раздувать токены.
 
-### Важно про ошибку `405 Method Not Allowed`
+---
 
-Если сервер вернул `405`, очень частая причина — base URL указан без `/v1`.
+## 6) Хранение истории диалога (универсальные варианты)
 
-В проекте добавлен fallback: при `405` и URL без `/v1` клиент автоматически повторяет запрос на `${AI_BASE_URL}/v1`.
-Но лучше сразу прописать корректный `AI_BASE_URL` c `/v1` в `.env`.
+Можно использовать:
 
-## 4) Как работает контекст 20 пар
+- SQLite/PostgreSQL/MySQL (через обычную Django-модель)
+- Redis (если нужен быстрый, временный контекст)
+- гибрид (БД + кеш)
 
-Функция `get_recent_dialog_context(limit_pairs=20)`:
+Минимум полей для БД:
 
-- берёт из SQLite последние `limit_pairs * 2` сообщений,
-- разворачивает в хронологический порядок,
-- маппит роли:
-  - `user` → `user`
-  - `ai` → `assistant`
+- `id`
+- `created_at`
+- `role` (`user` / `assistant`)
+- `content`
 
-Таким образом модель получает историю в правильном формате API.
+Практика:
 
-## 5) Где вызывается AI в HTTP-потоке
+- При отправке сообщения: сначала сохраните user-реплику.
+- После ответа модели: сохраните assistant-реплику.
+- Для контекста выбирайте последние N пар.
 
-В `chat_app/views.py` endpoint `POST /api/chat/`:
+---
 
-1. Считывает JSON с текстом пользователя.
-2. Сохраняет сообщение пользователя в БД.
-3. Вызывает `get_ai_response(user_text)`.
-4. Сохраняет ответ AI в БД.
-5. Возвращает JSON для фронтенда.
+## 7) Обработка ошибок и типовые причины проблем
 
-## 6) Обработка ошибок
+### Частые причины
 
-- Если `AI_BASE_URL`/`AI_API_KEY` не заданы, выбрасывается ошибка с понятным текстом.
-- Если вызов модели падает (сеть/401/500), пользователю возвращается текст ошибки в сообщении AI.
+1. Неверный `AI_BASE_URL` (особенно отсутствует `/v1`)
+2. Неверный API ключ
+3. Неверное имя модели
+4. Endpoint не поддерживает `chat.completions`
+5. Таймаут/сетевые ограничения
 
-## 7) Быстрая проверка подключения
+### Что делать
 
-1. Заполните `.env` по образцу `.env.example`.
-2. Запустите сервер Django.
-3. Отправьте сообщение в чате.
-4. Если конфигурация верная, увидите ответ модели.
-5. Если нет — увидите диагностический текст ошибки.
+- Логировать HTTP-статус и краткое тело ошибки (без утечки ключа).
+- Возвращать пользователю безопасное сообщение вида «Временная ошибка AI-сервиса».
+- Для `405 Method Not Allowed` первым делом проверить endpoint и метод.
+
+---
+
+## 8) Рекомендации по безопасности
+
+- Никогда не отдавайте API ключ во фронтенд.
+- Запрос к AI выполняйте только на backend.
+- Скрывайте stack trace от конечного пользователя.
+- Фильтруйте/маскируйте чувствительные данные в логах.
+- Для production добавьте rate limiting и аудит запросов.
+
+---
+
+## 9) Рекомендации для Codex/агентов (чтобы быстрее интегрировать в любой проект)
+
+Если этот файл читает агент:
+
+1. Найди `settings.py` и добавь чтение env-переменных `AI_*`.
+2. Найди/создай сервисный слой для запроса к AI (не смешивай с view).
+3. Проверь, где хранится история сообщений, и добавь выборку последних N пар в контекст.
+4. Убедись, что endpoint чата вызывает сервис и корректно обрабатывает исключения.
+5. Добавь `.env.example` с `AI_BASE_URL`, `AI_API_KEY`, `AI_MODEL`, `AI_MASTER_PROMPT`.
+6. Не хардкодь URL/ключ/модель в коде.
+
+---
+
+## 10) Мини-чеклист перед запуском
+
+- [ ] `AI_BASE_URL` корректен (обычно с `/v1`)
+- [ ] `AI_API_KEY` валиден
+- [ ] `AI_MODEL` существует на сервере
+- [ ] backend может достучаться до endpoint по сети
+- [ ] в логах видно входящий запрос и ответ AI без секретов
+- [ ] фронт не содержит ключей
+
+---
+
+## 11) Мини-чеклист для production
+
+- [ ] `DEBUG=False`
+- [ ] секреты только в защищённом хранилище/переменных окружения
+- [ ] централизованное логирование
+- [ ] ограничение частоты запросов
+- [ ] мониторинг ошибок AI (4xx/5xx/timeout)
+- [ ] fallback/деградация при недоступности модели
+
+---
+
+## 12) Быстрая диагностика 405
+
+Если видите:
+
+`405 Method Not Allowed`
+
+проверьте по порядку:
+
+1. Базовый URL (часто нужна версия `/v1`)
+2. Что вызывается именно `POST` endpoint chat completions
+3. Что ваш proxy/gateway не блокирует `POST`
+4. Что backend и endpoint используют совместимый OpenAI API формат
+
